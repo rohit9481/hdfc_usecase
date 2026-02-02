@@ -1,6 +1,4 @@
 import os
-import cv2
-import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
 print("SUPABASE_URL:", os.getenv("SUPABASE_URL"))
@@ -40,35 +38,6 @@ app.include_router(idfy_router)
 app.include_router(cartesia_router)
 app.include_router(supabase_router)
 
-def detect_face_from_bytes(img_bytes: bytes):
-    image_array = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Invalid image data")
-    gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    face_classifier = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = face_classifier.detectMultiScale(
-        gray_image, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
-    )
-    if faces is None or len(faces) == 0:
-        raise ValueError("No face detected in image")
-    (x, y, w, h) = faces[0]
-    cropped_face = img[y:y + h, x:x + w]
-    success, encoded = cv2.imencode('.png', cropped_face)
-    if not success:
-        raise ValueError("Failed to encode cropped face")
-    return encoded.tobytes()
-
-def upload_image_bytes(img_bytes: bytes, doc_type: str):
-    from backend.supabase_uploads import supabase
-    file_id = os.urandom(8).hex()
-    file_path = f"{file_id}_{doc_type}.png"
-    supabase.storage.from_('kyc_document').upload(file_path, img_bytes, {"content-type": "image/png"})
-    url = supabase.storage.from_('kyc_document').get_public_url(file_path)
-    return url
-
 # --- KYC PROCESS ENDPOINTS ---
 @app.post("/kyc/process-aadhaar")
 async def process_aadhaar(request: Request):
@@ -78,48 +47,14 @@ async def process_aadhaar(request: Request):
     
     def upload_image(b64, doc_type):
         img_bytes = base64.b64decode(b64.split(",")[-1])
-        return upload_image_bytes(img_bytes, doc_type)
+        from backend.supabase_uploads import supabase
+        file_id = os.urandom(8).hex()
+        file_path = f"{file_id}_{doc_type}.png"
+        supabase.storage.from_('kyc_document').upload(file_path, img_bytes, {"content-type": "image/png"})
+        url = supabase.storage.from_('kyc_document').get_public_url(file_path)
+        return url
     
     aadhaar_url = upload_image(aadhaar_b64, "aadhaar")
-    print(f"Session ID: {session_id}")
-    print(f"Aadhaar uploaded: {aadhaar_url}")
-    
-    # Create session first
-    from backend.supabase_uploads import supabase
-    try:
-        supabase.table('kyc_sessions').insert({
-            "session_id": session_id,
-            "status": "processing"
-        }).execute()
-    except Exception as e:
-        print(f"Session creation info: {e}")
-    
-    aadhaar_face_url = None
-    try:
-        print("Starting face extraction from Aadhaar...")
-        aadhaar_img_bytes = base64.b64decode(aadhaar_b64.split(",")[-1])
-        print(f"Decoded image: {len(aadhaar_img_bytes)} bytes")
-        
-        cropped_face_bytes = detect_face_from_bytes(aadhaar_img_bytes)
-        print(f"Face extracted: {len(cropped_face_bytes)} bytes")
-        
-        aadhaar_face_url = upload_image_bytes(cropped_face_bytes, "aadhaar_face")
-        print(f"Face uploaded: {aadhaar_face_url}")
-        
-        supabase.table('kyc_documents').insert({
-            "session_id": session_id,
-            "doc_type": "aadhaar_face",
-            "image_url": aadhaar_face_url,
-            "extracted_data": {
-                "source": "opencv_haar_cascade"
-            }
-        }).execute()
-        print(f"✓ Aadhaar face extracted and stored: {aadhaar_face_url}")
-    except Exception as e:
-        import traceback
-        print(f"⚠ Aadhaar face extraction failed: {e}")
-        print(traceback.format_exc())
-        aadhaar_face_url = None
     
     IDFY_API_KEY = os.getenv("IDFY_API_KEY")
     IDFY_ACCOUNT_ID = os.getenv("IDFY_ACCOUNT_ID")
@@ -147,6 +82,15 @@ async def process_aadhaar(request: Request):
         aadhaar_result = aadhaar_response[0] if isinstance(aadhaar_response, list) and len(aadhaar_response) > 0 else aadhaar_response
     
     print("Aadhaar result:", aadhaar_result)
+    
+    from backend.supabase_uploads import supabase
+    try:
+        supabase.table('kyc_sessions').insert({
+            "session_id": session_id,
+            "status": "processing"
+        }).execute()
+    except Exception as e:
+        print(f"Session creation info: {e}")
     
     # Check for IDfy errors
     if aadhaar_result.get('error') or aadhaar_result.get('status') == 'failed':
@@ -204,9 +148,18 @@ async def process_pan(request: Request):
     pan_b64 = data.get("pan_image")
     session_id = data.get("session_id")
     
+    # Generate session_id if not provided
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
     def upload_image(b64, doc_type):
         img_bytes = base64.b64decode(b64.split(",")[-1])
-        return upload_image_bytes(img_bytes, doc_type)
+        from backend.supabase_uploads import supabase
+        file_id = os.urandom(8).hex()
+        file_path = f"{file_id}_{doc_type}.png"
+        supabase.storage.from_('kyc_document').upload(file_path, img_bytes, {"content-type": "image/png"})
+        url = supabase.storage.from_('kyc_document').get_public_url(file_path)
+        return url
     
     pan_url = upload_image(pan_b64, "pan")
     
@@ -266,6 +219,10 @@ async def process_face(request: Request):
     face_b64 = data.get("face_image")
     session_id = data.get("session_id")
     
+    # Generate session_id if not provided
+    if not session_id:
+        session_id = str(uuid.uuid4())
+    
     def upload_image(b64, doc_type):
         img_bytes = base64.b64decode(b64.split(",")[-1])
         from backend.supabase_uploads import supabase
@@ -277,19 +234,11 @@ async def process_face(request: Request):
     
     face_url = upload_image(face_b64, "face")
     
-    # Get Aadhaar face URL from stored documents
+    # Get Aadhaar URL from stored documents
     from backend.supabase_uploads import supabase
-    aadhaar_face_doc = supabase.table('kyc_documents').select('image_url').eq('session_id', session_id).eq('doc_type', 'aadhaar_face').execute()
-    aadhaar_face_url = aadhaar_face_doc.data[-1]['image_url'] if aadhaar_face_doc.data else None
+    aadhaar_doc = supabase.table('kyc_documents').select('image_url').eq('session_id', session_id).eq('doc_type', 'aadhaar').execute()
+    aadhaar_url = aadhaar_doc.data[0]['image_url'] if aadhaar_doc.data else None
     
-    print(f"Session ID: {session_id}")
-    print(f"Aadhaar face URL: {aadhaar_face_url}")
-    print(f"Face documents found: {len(aadhaar_face_doc.data) if aadhaar_face_doc.data else 0}")
-    
-    if not aadhaar_face_url:
-        print(f"⚠ Aadhaar face not found for session {session_id}")
-        return JSONResponse({"session_id": session_id, "status": "face_failed", "error": "Aadhaar face not found. Please recapture Aadhaar."}, status_code=400)
-
     IDFY_API_KEY = os.getenv("IDFY_API_KEY")
     IDFY_ACCOUNT_ID = os.getenv("IDFY_ACCOUNT_ID")
     headers = {
@@ -297,10 +246,10 @@ async def process_face(request: Request):
         'account-id': IDFY_ACCOUNT_ID,
         'api-key': IDFY_API_KEY
     }
-
+    
     face_match_task = requests.post("https://eve.idfy.com/v3/tasks/async/compare/face",
         json={"task_id": session_id + "_face", "group_id": "kyc_group",
-              "data": {"document1": aadhaar_face_url, "document2": face_url}},
+              "data": {"document1": aadhaar_url, "document2": face_url}},
         headers=headers).json()
     
     print(f"\n=== FACE COMPARISON SUBMITTED ===")
@@ -323,24 +272,7 @@ async def process_face(request: Request):
     except Exception as e:
         print(f"Error storing face comparison: {e}")
     
-    def is_face_match(result: dict):
-        try:
-            comp = result.get('result', {}).get('comparison_output', {})
-            match_val = comp.get('match')
-            if isinstance(match_val, bool):
-                return match_val
-            if isinstance(match_val, str):
-                return match_val.strip().lower() in {"true", "yes", "match"}
-            score = comp.get('match_score') or comp.get('confidence')
-            if isinstance(score, (int, float)):
-                return score >= 0.6
-        except Exception:
-            pass
-        return False
-
-    face_match = is_face_match(face_match_result)
-
-    return JSONResponse({"session_id": session_id, "status": "face_processed", "face_match": face_match})
+    return JSONResponse({"session_id": session_id, "status": "face_processed"})
 
 @app.get("/kyc/get-details/{session_id}")
 async def get_kyc_details(session_id: str):

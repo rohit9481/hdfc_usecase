@@ -99,7 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function askPermission(step) {
-        app.innerHTML = `<img id="logo" src="logo.png" alt="HDFC Logo"><h2>${step.prompt}</h2>`;
+        app.innerHTML = `<h2>${step.prompt}</h2>`;
         speak(step.prompt);
         // Show allow button for manual fallback
         app.innerHTML += `<button id="allowBtn">Allow</button>`;
@@ -121,12 +121,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function startCameraFlow() {
+        // Aadhaar capture step
+        app.innerHTML = `<h2>Please show your Aadhaar card to the camera and click Capture.</h2><video id="video" autoplay playsinline width="300"></video><br><button id="aadhaarCaptureBtn">Capture Aadhaar</button>`;
+        speak('Please show your Aadhaar card to the camera and click Capture.');
         navigator.mediaDevices.getUserMedia({ video: true, audio: true })
             .then(stream => {
-                askAadhaarCard(stream);
+                document.getElementById('video').srcObject = stream;
+                document.getElementById('aadhaarCaptureBtn').onclick = () => {
+                    captureImage('aadhaar', stream);
+                };
             })
             .catch(err => {
-                app.innerHTML = `<p>Camera access denied. Please enable camera to continue.</p>`;
+                app.innerHTML += `<p>Camera access denied. Please enable camera to continue.</p>`;
             });
     }
 
@@ -134,8 +140,6 @@ document.addEventListener('DOMContentLoaded', () => {
     let panImage = null;
     let faceImage = null;
     let sessionId = null;
-    let processingPromises = []; // Track async processing for Aadhaar/PAN
-    let pendingFaceRetry = false;
 
     function captureImage(type, stream) {
         const video = document.getElementById('video');
@@ -153,94 +157,59 @@ document.addEventListener('DOMContentLoaded', () => {
             faceImage = dataUrl;
         }
         
-        if (type === 'aadhaar') {
-            if (pendingFaceRetry) {
-                app.innerHTML = `<h2>Comparing your face with your documents...</h2>`;
-                speak('Comparing your face with your documents.');
-                sendToIDfyAsync('aadhaar', dataUrl)
-                    .then(() => sendToIDfyAsync('face', faceImage))
-                    .then((result) => handleFaceMatchResult(result, stream))
-                    .catch(() => {
-                        app.innerHTML = `<h2>Error processing your details. Please try again.</h2>`;
-                    });
-                return;
-            }
-
-            // Send to IDfy in background (don't show "Processing..." message)
-            const p = sendToIDfyAsync('aadhaar', dataUrl);
-            processingPromises.push(p);
-            speak('Aadhaar card captured. Now please show your PAN card.');
-            askPanCard(stream);
-        } else if (type === 'pan') {
-            const p = sendToIDfyAsync('pan', dataUrl);
-            processingPromises.push(p);
-            speak('PAN card captured. Now please align your face for verification.');
-            askFace(stream);
-        } else if (type === 'face') {
-            app.innerHTML = `<h2>Comparing your face with your documents...</h2>`;
-            speak('Comparing your face with your documents.');
-            sendToIDfyAsync('face', dataUrl)
-                .then((result) => handleFaceMatchResult(result, stream))
-                .catch(() => {
-                    app.innerHTML = `<h2>Error processing your details. Please try again.</h2>`;
-                });
-        }
+        // Send to IDfy immediately
+        sendToIDfy(type, dataUrl, stream);
     }
 
-    async function sendToIDfyAsync(type, imageData) {
+    function sendToIDfy(type, imageData, stream) {
+        // Don't show processing screen - move to next step immediately
+        
         const endpoint = type === 'aadhaar' ? '/kyc/process-aadhaar' :
                         type === 'pan' ? '/kyc/process-pan' :
                         '/kyc/process-face';
         
+        // Build request body with session_id if it exists
         const requestBody = {
             [type + '_image']: imageData
         };
         
+        // Only add session_id if we already have one (for pan and face)
         if (sessionId) {
             requestBody.session_id = sessionId;
         }
         
-        try {
-            const response = await fetch(`${BACKEND_URL}${endpoint}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(requestBody)
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                const err = new Error(data && data.error ? data.error : 'Request failed');
-                err.data = data;
-                throw err;
-            }
-            
+        // Send to backend asynchronously (non-blocking)
+        fetch(`${BACKEND_URL}${endpoint}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        })
+        .then(res => res.json())
+        .then(data => {
+            // Get session_id from backend response (especially important for first call)
             if (data.session_id && !sessionId) {
                 sessionId = data.session_id;
                 console.log(`Session ID generated: ${sessionId}`);
             }
-            return data;
-        } catch (err) {
-            console.error('Error processing:', err);
-            throw err;
+        })
+        .catch(err => {
+            console.error('Error:', err);
+        });
+        
+        // Immediately move to next step (don't wait for processing)
+        if (type === 'aadhaar') {
+            speak('Now please show your PAN card.');
+            askPanCard(stream);
+        } else if (type === 'pan') {
+            speak('Now please align your face for verification.');
+            askFace(stream);
+        } else if (type === 'face') {
+            speak('Please wait while we verify your details...');
+            // Wait for all processing to complete (Aadhaar 5s + PAN 5s + Face 5s)
+            setTimeout(() => {
+                fetchAndShowDetails();
+            }, 8000);
         }
-    }
-
-    function handleFaceMatchResult(result, stream) {
-        if (result && (result.face_match === false || result.error || result.status === 'face_failed')) {
-            pendingFaceRetry = true;
-            speak('Face does not match the Aadhaar photo. Please capture your Aadhaar card again.');
-            askAadhaarCard(stream);
-            return;
-        }
-
-        pendingFaceRetry = false;
-        speak('Face matched. Processing your information...');
-        setTimeout(() => {
-            Promise.all(processingPromises)
-                .then(() => fetchAndShowDetails())
-                .catch(() => {
-                    app.innerHTML = `<h2>Error processing your details. Please try again.</h2>`;
-                });
-        }, 3000);
     }
 
     function fetchAndShowDetails() {
@@ -260,15 +229,6 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('video').srcObject = stream;
         document.getElementById('panCaptureBtn').onclick = () => {
             captureImage('pan', stream);
-        };
-    }
-
-    function askAadhaarCard(stream) {
-        app.innerHTML = `<h2>Please show your Aadhaar card to the camera and click Capture.</h2><video id="video" autoplay playsinline width="300"></video><br><button id="aadhaarCaptureBtn">Capture Aadhaar</button>`;
-        speak('Please show your Aadhaar card to the camera and click Capture.');
-        document.getElementById('video').srcObject = stream;
-        document.getElementById('aadhaarCaptureBtn').onclick = () => {
-            captureImage('aadhaar', stream);
         };
     }
 
