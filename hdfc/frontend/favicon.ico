@@ -1,0 +1,5 @@
+<!-- Simple 16x16 HDFC favicon -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <rect width="16" height="16" fill="#004c8f"/>
+  <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="12" font-weight="bold" font-family="Arial">H</text>
+</svg>
