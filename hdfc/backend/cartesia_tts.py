@@ -1,6 +1,7 @@
 import os
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from cartesia import Cartesia
+from cartesia.core.api_error import ApiError
 import base64
 
 router = APIRouter()
@@ -9,10 +10,13 @@ CARTESIA_VOICE_ID = os.getenv("CARTESIA_VOICE_ID")
 
 @router.post("/cartesia/tts")
 async def cartesia_tts(request: Request):
-    data = await request.json()
-    text = data.get("text")
-    
     try:
+        data = await request.json()
+        text = data.get("text")
+        
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
+        
         client = Cartesia(api_key=CARTESIA_API_KEY)
         audio_gen = client.tts.bytes(
             model_id="sonic-2",
@@ -31,7 +35,20 @@ async def cartesia_tts(request: Request):
         audio_bytes = b''.join(audio_gen)
         audio_b64 = base64.b64encode(audio_bytes).decode()
         return {"audio_b64": audio_b64}
+    
+    except ApiError as e:
+        if e.status_code == 402:
+            raise HTTPException(
+                status_code=402,
+                detail="Cartesia credits limit reached. Please upgrade your subscription."
+            )
+        else:
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=f"Cartesia API error: {e.body}"
+            )
     except Exception as e:
-        # Return empty response on error - frontend will fallback to browser TTS
-        print(f"Cartesia TTS error: {e}")
-        return {"audio_b64": None, "error": str(e)}
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
